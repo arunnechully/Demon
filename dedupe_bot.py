@@ -1,45 +1,73 @@
 import os
 import sqlite3
 from pyrogram import Client, filters
+from pyrogram.types import Message
 
-# Load environment variables
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Initialize SQLite database
-conn = sqlite3.connect("seen_files.db", check_same_thread=False)
-cursor = conn.cursor()
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS files (
-        file_unique_id TEXT PRIMARY KEY
-    )
+app = Client("dedupe_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# ========== SQLite Setup ==========
+conn = sqlite3.connect("dedupe.db")
+cur = conn.cursor()
+cur.execute("""
+CREATE TABLE IF NOT EXISTS messages (
+    chat_id INTEGER,
+    content TEXT,
+    PRIMARY KEY (chat_id, content)
+)
 """)
 conn.commit()
 
-# Initialize bot
-app = Client("dedupe_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+# ========== /start ==========
+@app.on_message(filters.command("start") & filters.private)
+async def start(client, message: Message):
+    await message.reply_text(
+        "☠️ **Welcome to The Real Reaper**\n\n"
+        "I'm watching your chat for duplicates. Add me to a group and use /enable to activate."
+    )
 
-def is_duplicate(file_id):
-    cursor.execute("SELECT 1 FROM files WHERE file_unique_id = ?", (file_id,))
-    return cursor.fetchone() is not None
+# ========== /enable ==========
+enabled_chats = set()
 
-def mark_seen(file_id):
-    cursor.execute("INSERT OR IGNORE INTO files (file_unique_id) VALUES (?)", (file_id,))
-    conn.commit()
+@app.on_message(filters.command("enable") & filters.group)
+async def enable(client, message: Message):
+    enabled_chats.add(message.chat.id)
+    await message.reply_text("✅ Duplicate detection enabled in this group!")
 
-@app.on_message(filters.document | filters.video | filters.photo | filters.audio)
-def handle_files(client, message):
-    media = message.document or message.video or message.photo or message.audio
+@app.on_message(filters.command("disable") & filters.group)
+async def disable(client, message: Message):
+    enabled_chats.discard(message.chat.id)
+    await message.reply_text("❌ Duplicate detection disabled in this group!")
 
-    if media and hasattr(media, 'file_unique_id'):
-        unique_id = media.file_unique_id
+# ========== Duplicate Detector ==========
+@app.on_message(filters.text & filters.group)
+async def detect_duplicates(client, message: Message):
+    chat_id = message.chat.id
+    if chat_id not in enabled_chats:
+        return
 
-        if is_duplicate(unique_id):
-            print(f"Duplicate file detected: {unique_id}")
-            message.delete()
-        else:
-            print(f"New file: {unique_id}")
-            mark_seen(unique_id)
+    content = message.text.strip()
 
+    # Check if already exists
+    cur.execute("SELECT 1 FROM messages WHERE chat_id = ? AND content = ?", (chat_id, content))
+    if cur.fetchone():
+        try:
+            await message.delete()
+            print(f"Deleted duplicate in chat {chat_id}")
+        except Exception as e:
+            print("Failed to delete:", e)
+    else:
+        cur.execute("INSERT OR IGNORE INTO messages (chat_id, content) VALUES (?, ?)", (chat_id, content))
+        conn.commit()
+
+# ========== Graceful Shutdown ==========
+import atexit
+@atexit.register
+def cleanup():
+    conn.close()
+
+# ========== Run ==========
 app.run()
