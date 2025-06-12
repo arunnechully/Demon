@@ -1,33 +1,45 @@
 import os
+import sqlite3
 from pyrogram import Client, filters
 
+# Load environment variables
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
+# Initialize SQLite database
+conn = sqlite3.connect("seen_files.db", check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS files (
+        file_unique_id TEXT PRIMARY KEY
+    )
+""")
+conn.commit()
+
+# Initialize bot
 app = Client("dedupe_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-seen_files = set()
+def is_duplicate(file_id):
+    cursor.execute("SELECT 1 FROM files WHERE file_unique_id = ?", (file_id,))
+    return cursor.fetchone() is not None
 
-@app.on_message(filters.group)
-def remove_duplicates(client, message):
-    file_id = None
-    if message.photo:
-        file_id = message.photo.file_unique_id
-    elif message.video:
-        file_id = message.video.file_unique_id
-    elif message.document:
-        file_id = message.document.file_unique_id
-    elif message.audio:
-        file_id = message.audio.file_unique_id
-    elif message.voice:
-        file_id = message.voice.file_unique_id
+def mark_seen(file_id):
+    cursor.execute("INSERT OR IGNORE INTO files (file_unique_id) VALUES (?)", (file_id,))
+    conn.commit()
 
-    if file_id:
-        if file_id in seen_files:
+@app.on_message(filters.document | filters.video | filters.photo | filters.audio)
+def handle_files(client, message):
+    media = message.document or message.video or message.photo or message.audio
+
+    if media and hasattr(media, 'file_unique_id'):
+        unique_id = media.file_unique_id
+
+        if is_duplicate(unique_id):
+            print(f"Duplicate file detected: {unique_id}")
             message.delete()
         else:
-            seen_files.add(file_id)
+            print(f"New file: {unique_id}")
+            mark_seen(unique_id)
 
-if __name__ == "__main__":
-    app.run()
+app.run()
